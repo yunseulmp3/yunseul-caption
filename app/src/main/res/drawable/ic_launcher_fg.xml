@@ -1,0 +1,10 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <!-- 윤슬: 동심원 물결 + 자막 두 줄 -->
+    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="2.5" android:fillColor="#00000000"
+        android:pathData="M54,30a16,16 0,1 1,-0.01 0z"/>
+    <path android:strokeColor="#99FFFFFF" android:strokeWidth="2" android:fillColor="#00000000"
+        android:pathData="M54,38a8,8 0,1 1,-0.01 0z"/>
+    <path android:fillColor="#B3FFFFFF" android:pathData="M36,68h36a2,2 0,0 1,0 4h-36a2,2 0,0 1,0 -4z"/>
+    <path android:fillColor="#FFFFFFFF" android:pathData="M30,76h48a2.5,2.5 0,0 1,0 5h-48a2.5,2.5 0,0 1,0 -5z"/>
+</vector>

@@ -1,0 +1,91 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  WHISPER_TAG: v1.9.5
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: 서명 키 캐시 복원
+        uses: actions/cache@v4
+        with:
+          path: ~/signing
+          key: yunseul-caption-signing-v1
+
+      - name: 서명 키 준비 (없으면 한 번만 생성)
+        run: |
+          mkdir -p ~/signing
+          if [ ! -f ~/signing/release.jks ]; then
+            PASS=$(openssl rand -hex 16)
+            echo -n "$PASS" > ~/signing/pass
+            keytool -genkeypair -keystore ~/signing/release.jks -storetype PKCS12 \
+              -storepass "$PASS" -keypass "$PASS" -alias caption -keyalg RSA -keysize 2048 \
+              -validity 36500 -dname "CN=Yunseul Caption"
+            echo "새 서명 키 생성"
+          fi
+          PASS=$(cat ~/signing/pass)
+          echo "::add-mask::$PASS"
+          echo "SIGNING_STORE=$HOME/signing/release.jks" >> "$GITHUB_ENV"
+          echo "SIGNING_PASS=$PASS" >> "$GITHUB_ENV"
+
+      - name: whisper.cpp 소스 받기
+        run: git clone --depth 1 --branch "$WHISPER_TAG" https://github.com/ggml-org/whisper.cpp app/src/main/cpp/whisper.cpp
+
+      - name: APK 빌드
+        id: gradle
+        run: |
+          set -o pipefail
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace assembleRelease 2>&1 | tee build.log
+          cp app/build/outputs/apk/release/app-release.apk yunseul-caption.apk
+          ls -la yunseul-caption.apk
+
+      - name: 릴리즈(latest)에 APK 올리기
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest -y --cleanup-tag || true
+          gh release create latest yunseul-caption.apk \
+            --title "윤슬 자막 (빌드 #${{ github.run_number }})" \
+            --notes "폰에서 yunseul-caption.apk 를 눌러 받아서 설치하면 돼." \
+            --target "${{ github.sha }}" --latest
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-output
+          path: |
+            yunseul-caption.apk
+            build.log
+          if-no-files-found: ignore
+
+      - name: 빌드 로그를 build-logs 브랜치에 기록
+        if: always()
+        run: |
+          STATUS="${{ job.status }}"
+          mkdir -p /tmp/logs
+          echo "run=${{ github.run_number }} sha=${{ github.sha }} status=$STATUS" > /tmp/logs/STATUS.txt
+          [ -f build.log ] && tail -c 400000 build.log > /tmp/logs/build.log || true
+          cd /tmp/logs
+          git init -q -b build-logs
+          git config user.name "build-bot"
+          git config user.email "build-bot@users.noreply.github.com"
+          git add -A
+          git commit -q -m "build #${{ github.run_number }}: $STATUS"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" build-logs
