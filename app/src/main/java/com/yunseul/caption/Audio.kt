@@ -66,19 +66,26 @@ class Resampler(inRate: Int, outRate: Int = 16000) {
 /**
  * VAD 기반 발화 분할기.
  * - 말소리 시작 전 256ms 프리롤 포함 (첫 음절 안 잘리게)
- * - 무음 480ms 지속되면 문장 끝으로 보고 내보냄
- * - 8초 넘게 계속 말하면 4~8초 구간에서 말소리 확률이 가장 낮은 지점(숨 쉬는 곳)에서 자름
+ * - 무음 320ms 지속되면 문장 끝으로 보고 확정본 내보냄
+ * - 6초 넘게 계속 말하면 3~6초 구간에서 말소리 확률이 가장 낮은 지점(숨 쉬는 곳)에서 자름
+ * - 말하는 도중에도 0.8초마다 '지금까지 들은 부분'을 미리보기로 내보냄 → 자막이 말을 따라오며 바뀜
  */
-class Segmenter(private val vad: Vad, private val onSegment: (FloatArray) -> Unit) {
+class Segmenter(
+    private val vad: Vad,
+    private val onPartial: (FloatArray) -> Unit,
+    private val onSegment: (FloatArray) -> Unit,
+) {
 
     companion object {
         const val FRAME = 512                 // 32ms @16k
         private const val ON = 0.5f            // 말 시작 판정
         private const val OFF = 0.35f          // 말 유지 판정 (히스테리시스)
-        private const val END_SILENCE = 15     // 480ms
+        private const val END_SILENCE = 10     // 320ms
         private const val TAIL = 4             // 문장 끝 128ms 여유
         private const val PREROLL = 8          // 256ms
-        private const val MAX = 250            // 8s
+        private const val MAX = 188            // 6s
+        private const val PARTIAL_EVERY = 25   // 0.8s
+        private const val PARTIAL_MIN = 30     // 1s 이상 쌓여야 미리보기
         private const val MIN_SPEECH = 8       // 256ms 미만 말소리는 버림 (잡음)
     }
 
@@ -89,6 +96,7 @@ class Segmenter(private val vad: Vad, private val onSegment: (FloatArray) -> Uni
     private val probs = ArrayList<Float>()
     private var inSpeech = false
     private var silenceRun = 0
+    private var lastPartialAt = 0
 
     fun feed(x: FloatArray) {
         var i = 0
@@ -130,22 +138,29 @@ class Segmenter(private val vad: Vad, private val onSegment: (FloatArray) -> Uni
             seg.clear(); probs.clear()
             inSpeech = false
             silenceRun = 0
+            lastPartialAt = 0
         } else if (seg.size >= MAX) {
             var cut = MAX / 2
             for (k in MAX / 2 until seg.size - 5) if (probs[k] < probs[cut]) cut = k
             emit(cut)
+            lastPartialAt = 0
+        } else if (silenceRun == 0 && seg.size >= PARTIAL_MIN && seg.size - lastPartialAt >= PARTIAL_EVERY) {
+            lastPartialAt = seg.size
+            onPartial(concat(seg.size))
         }
+    }
+
+    private fun concat(e: Int): FloatArray {
+        val out = FloatArray(e * FRAME)
+        for (k in 0 until e) System.arraycopy(seg[k], 0, out, k * FRAME, FRAME)
+        return out
     }
 
     /** seg[0, end) 를 하나로 합쳐 내보내고 seg에서 제거 */
     private fun emit(end: Int) {
         val e = end.coerceIn(0, seg.size)
         val speech = (0 until e).count { probs[it] >= OFF }
-        if (speech >= MIN_SPEECH) {
-            val out = FloatArray(e * FRAME)
-            for (k in 0 until e) System.arraycopy(seg[k], 0, out, k * FRAME, FRAME)
-            onSegment(out)
-        }
+        if (speech >= MIN_SPEECH) onSegment(concat(e))
         repeat(e) { seg.removeAt(0); probs.removeAt(0) }
     }
 }

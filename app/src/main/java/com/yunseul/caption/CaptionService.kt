@@ -19,7 +19,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.util.Log
 import java.util.concurrent.LinkedBlockingDeque
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * 핵심 파이프라인:
@@ -44,7 +44,10 @@ class CaptionService : Service() {
     private var overlay: Overlay? = null
     private var whisper: Whisper? = null
     private var vad: Vad? = null
-    private val queue = LinkedBlockingDeque<FloatArray>()
+    private class Chunk(val pcm: FloatArray, val at: Long)
+    private val queue = LinkedBlockingDeque<Chunk>()            // 확정 문장
+    private val partial = AtomicReference<Chunk?>(null)          // 말하는 중 미리보기 (최신 1개만)
+    @Volatile private var lastKo = ""
     private var captureThread: Thread? = null
     private var asrThread: Thread? = null
     @Volatile private var alive = false
@@ -126,20 +129,55 @@ class CaptionService : Service() {
 
         val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
         var lastText = ""
+        var lastPartialText = ""
         while (alive) {
-            val seg = try { queue.poll(300, TimeUnit.MILLISECONDS) } catch (e: InterruptedException) { break } ?: continue
+            // 확정 문장이 우선, 없으면 미리보기
+            var isFinal = true
+            var c: Chunk? = queue.pollFirst()
+            if (c == null) { c = partial.getAndSet(null); isFinal = false }
+            if (c == null) {
+                try { Thread.sleep(40) } catch (e: InterruptedException) { break }
+                continue
+            }
             // Whisper는 1초 미만이면 불안정 → 무음 패딩
-            val pcm = if (seg.size < 16000) seg.copyOf(16000) else seg
+            val pcm = if (c.pcm.size < 16000) c.pcm.copyOf(16000) else c.pcm
             val t0 = System.currentTimeMillis()
             val r = w.transcribe(pcm, LANG, threads) ?: continue
-            val t1 = System.currentTimeMillis()
-            Log.i(TAG, "asr ${seg.size / 16}ms audio → ${t1 - t0}ms, nsp=${r.noSpeech}: ${r.text}")
+            val asrMs = System.currentTimeMillis() - t0
+            Log.i(TAG, "${if (isFinal) "final" else "partial"} ${c.pcm.size / 16}ms audio → ${asrMs}ms nsp=${r.noSpeech}: ${r.text}")
             if (!alive) break
-            if (Hallucination.isBad(r.text, r.noSpeech) || r.text == lastText) continue
+            if (Hallucination.isBad(r.text, r.noSpeech)) continue
+
+            if (!isFinal) {
+                // 확정이 이미 기다리고 있으면 미리보기는 버림
+                if (queue.isNotEmpty() || r.text == lastPartialText) continue
+                lastPartialText = r.text
+                ov.caption(r.text, partial = true, info = "인식 ${asrMs / 100 / 10.0}초")
+                translateAsync(ov, r.text, partial = true)
+                continue
+            }
+
+            lastPartialText = ""
+            if (r.text == lastText) continue
             lastText = r.text
-            ov.caption(r.text, null)                 // 원문 먼저 표시
-            val ko = Translator.toKorean(r.text, LANG)
-            if (alive) ov.caption(r.text, ko ?: "(번역 실패 — 인터넷 연결 확인)")
+            val lag = (System.currentTimeMillis() - c.at) / 100 / 10.0
+            ov.caption(r.text, partial = false, info = "처리 ${lag}초")
+            translateAsync(ov, r.text, partial = false)
+        }
+    }
+
+    // 번역은 인식을 막지 않게 별도 스레드. 늦게 도착한 옛 번역은 버림.
+    private val trSeq = java.util.concurrent.atomic.AtomicLong(0)
+    private val trPool = java.util.concurrent.Executors.newSingleThreadExecutor()
+
+    private fun translateAsync(ov: Overlay, ja: String, partial: Boolean) {
+        val id = trSeq.incrementAndGet()
+        trPool.execute {
+            if (id != trSeq.get()) return@execute          // 더 새 문장이 이미 들어옴
+            val ko = Translator.toKorean(ja, LANG)
+            if (!alive || id != trSeq.get()) return@execute
+            if (ko != null) { lastKo = ko; ov.translation(ja, ko, partial) }
+            else if (!partial) ov.translation(ja, "(번역 실패 — 인터넷 연결 확인)", false)
         }
     }
 
@@ -188,11 +226,14 @@ class CaptionService : Service() {
         record = rec
 
         val rs = Resampler(rate)
-        val segmenter = Segmenter(v) { seg ->
-            // 인식이 밀리면 오래된 문장부터 버림 → 자막이 영상보다 계속 늦어지는 것 방지
-            while (queue.size >= 2) queue.pollFirst()
-            queue.offerLast(seg)
-        }
+        val segmenter = Segmenter(v,
+            onPartial = { seg -> partial.set(Chunk(seg, System.currentTimeMillis())) },
+            onSegment = { seg ->
+                partial.set(null)
+                // 인식이 밀리면 오래된 문장부터 버림 → 자막이 영상보다 계속 늦어지는 것 방지
+                while (queue.size >= 2) queue.pollFirst()
+                queue.offerLast(Chunk(seg, System.currentTimeMillis()))
+            })
 
         rec.startRecording()
         captureThread = Thread({
@@ -218,6 +259,7 @@ class CaptionService : Service() {
         runCatching { record?.release() }
         asrThread?.interrupt()
         asrThread?.join(3000)
+        trPool.shutdownNow()
         whisper?.close()
         vad?.close()
         overlay?.remove()

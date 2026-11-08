@@ -95,6 +95,14 @@ Java_com_yunseul_caption_Whisper_nativeTranscribe(JNIEnv * env, jclass, jlong ha
     p.temperature_inc  = 0.0f;       // 폴백 재디코딩 끔 — 실시간성 우선
     p.no_speech_thold  = 0.6f;
 
+    // 속도 핵심: Whisper 인코더는 기본적으로 항상 30초(1500칸)를 계산함.
+    // 실제 오디오 길이(20ms당 1칸) + 1초 여유만 계산하게 줄이면 4초 문장 기준 수 배 빨라짐.
+    {
+        int need = (int) ((double) n / 16000.0 * 50.0) + 50;
+        need = ((need + 63) / 64) * 64;
+        p.audio_ctx = need < 1500 ? need : 0;
+    }
+
     if (whisper_full(ctx, p, pcm.data(), n) != 0) return out;
 
     std::string text;

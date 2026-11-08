@@ -41,6 +41,11 @@ class Overlay(private val ctx: Context) {
         paint.isFakeBoldText = true
         gravity = Gravity.CENTER
     }
+    private val info = TextView(ctx).apply {
+        setTextColor(0x80FFFFFF.toInt())
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
+        gravity = Gravity.END
+    }
     private val root = LinearLayout(ctx).apply {
         orientation = LinearLayout.VERTICAL
         gravity = Gravity.CENTER_HORIZONTAL
@@ -52,7 +57,11 @@ class Overlay(private val ctx: Context) {
         }
         addView(ja)
         addView(ko)
+        addView(info, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
     }
+    private var currentJa = ""
+    private var statusShown = false
 
     private val lp = WindowManager.LayoutParams(
         WindowManager.LayoutParams.WRAP_CONTENT,
@@ -115,17 +124,35 @@ class Overlay(private val ctx: Context) {
         root.visibility = View.VISIBLE
         ja.text = ""
         ja.visibility = View.GONE
+        info.text = ""
+        ko.alpha = 1f
         ko.text = msg
+        statusShown = true
     }
 
-    fun caption(jaText: String, koText: String?) = main.post {
+    /**
+     * 일본어 갱신. 한국어 줄은 번역이 올 때까지 이전 번역을 흐리게 유지 (깜빡임 방지).
+     * partial = 말하는 중 미리보기 (일본어 줄을 살짝 흐리게)
+     */
+    fun caption(jaText: String, partial: Boolean, info: String) = main.post {
         fitWidth()
+        currentJa = jaText
         ja.visibility = if (prefs.getBoolean("showJa", true)) View.VISIBLE else View.GONE
         ja.text = jaText
-        ko.text = koText ?: "…"
+        ja.alpha = if (partial) 0.75f else 1f
+        if (statusShown || ko.text.isNullOrEmpty()) { ko.text = "…"; statusShown = false }
+        ko.alpha = 0.45f
+        this.info.text = info
         root.visibility = View.VISIBLE
         main.removeCallbacks(hideRunnable)
         main.postDelayed(hideRunnable, 8000)
+    }
+
+    /** 번역 도착 — 지금 떠 있는 일본어에 대한 번역일 때만 반영 */
+    fun translation(jaText: String, koText: String, partial: Boolean) = main.post {
+        if (jaText != currentJa) return@post
+        ko.text = koText
+        ko.alpha = if (partial) 0.85f else 1f
     }
 
     /** 화면 회전 대응: 매번 화면 폭 기준으로 최대 폭 갱신 */
@@ -133,5 +160,6 @@ class Overlay(private val ctx: Context) {
         val w = ctx.resources.displayMetrics.widthPixels - dp(48f).toInt()
         ja.maxWidth = w
         ko.maxWidth = w
+        info.maxWidth = w
     }
 }
